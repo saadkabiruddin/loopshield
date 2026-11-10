@@ -1,0 +1,13 @@
+\begin{tabular}{llrrrrrr}
+\toprule
+Config & Condition & \makecell{Ctl exec\\mean/max ($\mu$s)} & \makecell{WCRT\\($\mu$s)} & \makecell{Detector\\mean ($\mu$s)} & \makecell{Check\\($\mu$s/msg)} & \makecell{Rx\\(msg/s)} & Misses \\
+\midrule
+No defense & baseline & 12.2 / 231 & 27543 & 1.0 & 26.9 & 7 & 0 \\
+No defense & flooding & 13.0 / 213 & 26920 & 0.6 & 8.9 & 657 & 0 \\
+Protocol & baseline & 12.8 / 263 & 26859 & 0.6 & 28.1 & 7 & 0 \\
+Protocol & flooding & 12.6 / 215 & 28293 & 0.7 & 8.6 & 655 & 0 \\
+Physics & baseline & 11.0 / 193 & 28040 & 2.8 & 21.1 & 7 & 0 \\
+Both & baseline & 11.8 / 157 & 27387 & 3.4 & 27.0 & 6 & 0 \\
+Both & flooding & 9.5 / 301 & 4294995682 & 2.6 & 5.5 & 652 & 1863 \\
+\bottomrule
+\end{tabular}

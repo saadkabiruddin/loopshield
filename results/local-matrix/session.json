@@ -1,0 +1,35 @@
+{
+  "Command": "matrix",
+  "Trials": 1,
+  "Attacks": [
+    "none",
+    "bias",
+    "ramp",
+    "replay",
+    "forgery",
+    "flood",
+    "disturb"
+  ],
+  "Configs": [
+    "none",
+    "proto",
+    "phys",
+    "both"
+  ],
+  "WarmupS": 30,
+  "AttackS": 120,
+  "RecoverS": 30,
+  "Setpoint": 22,
+  "TAmb": 15,
+  "Gain": 20,
+  "DistTAmb": 5,
+  "Mitigate": true,
+  "CusumK": 0.05,
+  "CusumH": 4,
+  "Bias": -3,
+  "Ramp": -0.01,
+  "RecordS": 30,
+  "ForgeValue": 18,
+  "FloodRate": 1000,
+  "Out": null
+}

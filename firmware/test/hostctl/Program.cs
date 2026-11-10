@@ -22,12 +22,14 @@ CultureInfo.CurrentCulture = CultureInfo.InvariantCulture;
 
 NativeLibrary.SetDllImportResolver(typeof(Native).Assembly, (name, _, _) =>
 {
+    if (name != "sghost") return IntPtr.Zero;
+    string library = OperatingSystem.IsWindows() ? "sghost.dll" : "libsghost.so";
     for (var d = new DirectoryInfo(AppContext.BaseDirectory); d != null; d = d.Parent)
     {
-        var p = Path.Combine(d.FullName, "firmware", "test", "build", "libsghost.so");
+        var p = Path.Combine(d.FullName, "firmware", "test", "build", library);
         if (File.Exists(p)) return NativeLibrary.Load(p);
     }
-    throw new DllNotFoundException("libsghost.so not found; run `make -C firmware/test hostlib`");
+    throw new DllNotFoundException($"{library} not found; on Windows run ./scripts/run-local.ps1; on Linux run `make -C firmware/test hostlib`");
 });
 
 const float Sp = 22f, Kp = 0.5f, Ki = 0.5f / 60f, Dt = 0.1f;

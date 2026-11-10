@@ -1,129 +1,220 @@
-# LoopShield: Layered Sensor Spoofing Detection for Real-Time Controllers
+﻿# LoopShield
 
-Can a resource-constrained real-time controller detect sensor spoofing on its
-communication link, at both the protocol and physical layers, without missing
-its control deadlines?
+Layered sensor spoofing detection for a networked temperature controller, built
+with C, C#, MQTT, ESP-IDF/FreeRTOS, and Python.
 
-```
- ┌──────────────┐ sg/sensor (signed, 100 ms) ┌─────────┐       ┌──────────┐        ┌───────────────────────┐
- │ plant (C#)   │──────────────────────────▶│ broker  │◀─────▶│ attacker │◀──────▶│ controller            │
- │ room+heater  │◀──────────────────────────│ :1884   │       │ proxy    │  :1883 │ ESP32 / FreeRTOS      │
- │ TRUE temp log│ sg/actuator               └─────────┘       │ (MITM)   │        │ in Wokwi              │
- └──────────────┘                                ▲            └──────────┘        │ PI @ 100 ms           │
-                                                 │ sg/config, sg/telem, sg/stats  │ protocol checks       │
-                                          ┌──────┴──────┐                         │ physics detector task │
-                                          │ harness (C#)│                         └───────────────────────┘
-                                          └─────────────┘
-```
+LoopShield combines message authentication and replay checks with a model-based
+physics detector. An automated harness injects attacks, switches defenses, and
+compares controller telemetry with the room model's independent ground truth.
+The Windows workflow runs the firmware's portable C defense code in a local
+host controller; no Wokwi or physical ESP32 is required.
 
-The controller always reaches the broker through the attacker's proxy. With no
-attack running it is a transparent relay, so attacked and clean runs share
-the same network path.
+**Status:** working host-based evaluation prototype with preliminary results.
+ESP32 firmware is included, but the results below do not validate hardware
+execution times or real-time deadlines.
 
-| Folder              | What                                                                   |
-|---------------------|------------------------------------------------------------------------|
-| `firmware/`         | ESP-IDF v6.1 controller: PI task, protocol checks, physics detector     |
-| `firmware/test/`    | Host unit tests, closed-loop detector simulation, host stand-in controller |
-| `plant/`            | Room simulator: signs readings, logs ground truth, optional disturbance |
-| `attacker/`         | On-path MQTT proxy with five attack modes                               |
-| `broker/`           | Local MQTT broker (MQTTnet), port 1884                                  |
-| `harness/`          | Runs the attack × defense matrix unattended                             |
-| `shared/`           | Wire format, HMAC, topics (mirrors `firmware/main/sg_msg.h`)            |
-| `eval/`             | Analysis: matrix, plots, ROC, timing tables                             |
-| `paper/`            | Write-up (LaTeX); tables and figures come from `eval/analyze.py`        |
+## Architecture
 
-## Defenses
-
-Both layers are switched at runtime through `sg/config`, so one firmware image
-covers every configuration.
-
-- **Protocol layer** (MQTT task, on every sensor message): truncated
-  HMAC-SHA256 (64 bit, PSA Crypto), strictly increasing sequence numbers, and a
-  freshness check that needs no clock synchronization. It tracks the
-  smallest local-minus-sender offset seen and rejects anything more than
-  250 ms (+1 % drift) above it. An earlier "relative to the last message"
-  version allowed an incremental-delay attack, which the protocol search found.
-- **Physics layer** (its own task, each period): a model-based observer, a
-  two-sided CUSUM on its innovation (k = 0.05, h = 4), and a slope invariant
-  (the temperature can't change faster or slower than any heater duty and any
-  ambient in [5, 25] °C allow). After an alarm, the controller regulates the
-  model estimate instead of the sensor.
-- **No fresh data for 5 periods** → the controller holds its output instead of
-  integrating on stale readings.
-
-## Wire format
-
-Every message is 28 bytes, little-endian: version, type, flags, seq,
-timestamp (ms), float value, and an 8-byte truncated HMAC. All fields are
-present in every configuration, so enabling a defense changes only the
-checking. Message size and parse cost stay the same.
-
-## Setup (once)
-
-```bash
-echo 'export DOTNET_ROOT=/var/snap/dotnet/common/dotnet' >> ~/.bashrc   # snap .NET
-python3 -m venv eval/.venv && eval/.venv/bin/pip install matplotlib numpy
+```text
+Room/heater model <--> MQTT broker :1884 <--> Attack proxy :1883 <--> Controller
+                           ^                                      (C defense code)
+                           |
+                    Evaluation harness
+                  configuration + logging
+                           |
+                     Python analysis
 ```
 
-## Build
+The proxy stays in the path even for attack-free runs. The plant signs sensor
+readings and records true temperature separately from the readings seen by the
+controller. The harness starts the proxy and plant for each run and waits for
+the controller to acknowledge the requested defense configuration.
+
+## Implemented defenses
+
+- **Protocol:** HMAC-SHA256 truncated to 64 bits, increasing sequence numbers,
+  and timestamp freshness checks. Freshness uses a minimum observed clock
+  offset with a 250 ms window and 1% drift allowance.
+- **Physics:** model-based observer, two-sided CUSUM, and bounds on the rate of
+  temperature change. On an alarm, mitigation regulates the model estimate.
+- **Stale readings:** after five periods without fresh data, hold the actuator
+  output instead of integrating stale measurements.
+
+The nominal control period is 100 ms. Sensor and actuator messages use a fixed
+28-byte little-endian format, including an 8-byte MAC. Defense options are
+changed at runtime through `sg/config`.
+
+## Quick start on Windows
+
+Run commands from the repository root in PowerShell. Prerequisites:
+
+- .NET 10 SDK (`dotnet --version`)
+- 64-bit MinGW GCC on PATH (`gcc --version`)
+- Python with the `py` launcher, for analysis
+- Local TCP ports 1883 and 1884 available
+
+Run a short bias attack with both defenses enabled:
+
+```powershell
+.\scripts\run-local.ps1
+```
+
+The launcher builds the .NET projects and native Windows library, starts the
+broker and host controller, runs the evaluation, and stops those services when
+it finishes. Service logs go to `runs/local-services-<timestamp>/`.
+The room/heater remains a software model.
+
+Run all seven scenarios across four defense configurations, once per cell:
+
+```powershell
+.\scripts\run-local.ps1 matrix --trials 1
+```
+
+This takes approximately 1.5 hours. Results go to `runs/matrix-<timestamp>/`.
+For an explicit output folder, or to resume an interrupted session:
+
+```powershell
+.\scripts\run-local.ps1 matrix --trials 1 --out runs/my-session
+```
+
+The harness skips runs already marked complete. It does not automatically
+replace completed runs that the analyzer later flags as invalid.
+
+Run a specific cell:
+
+```powershell
+.\scripts\run-local.ps1 single --attack replay --config both --out runs/replay-check
+```
+
+Configurations: `none`, `proto`, `phys`, `both`. Common options include
+`--warmup 30 --attack-s 120 --recover 30`, `--no-mitigate`, `--k 0.05`, and
+`--h 4`. The default quick check uses shorter windows and is only a smoke test.
+
+## Analyze a session
+
+Install dependencies once, then substitute your session folder:
+
+```powershell
+py -m pip install -r eval/requirements.txt
+py eval/analyze.py runs/my-session --out results/my-session
+```
+
+Outputs include:
+
+| File | Purpose |
+| --- | --- |
+| `matrix.md` / `matrix.csv` | Detection, time to detect, temperature deviation, false positives |
+| `runs.csv` | Per-run metrics and validity flags, including excluded runs |
+| `temp_grid.png` / `temp_<attack>.png` | True temperature and controller behavior |
+| `roc.csv` / `roc.png` | Offline CUSUM threshold sweep |
+| `timing.csv` / `timing.png` | Diagnostic timing; host measurements are not ESP32 results |
+| `*.tex` | Generated tables for the paper draft |
+
+The analyzer excludes runs flagged as reset or insufficiently covered. A blank
+matrix cell means no valid result was aggregated for that cell.
+
+## Preliminary results
+
+The checked-in [analysis snapshot](results/local-matrix/README.md) comes from
+`matrix-20261110-231635`: one trial per cell, 30 s warmup, 120 s attack, and
+30 s recovery. Of 28 cells, 27 were included by the analyzer. These are
+observations from a single host-based session, not statistical reliability
+estimates. A displayed 100% detection rate represents one detected trial.
+
+| Attack | No-defense maximum deviation | Both defenses: detection time | Both defenses: maximum deviation |
+| --- | --- | --- | --- |
+| Bias | 2.94 C | 0.066 s | 0.18 C |
+| Slow ramp | 1.12 C | 0.155 s | 0.12 C |
+| Forgery | 11.24 C | 0.083 s | 0.02 C |
+| Replay | 8.41 C | 0.145 s | 9.00 C |
+| Flooding | 0.75 C | 0.028 s | 0.01 C |
+
+Bias, ramp, and forgery were detected within 0.2 seconds with both defenses,
+with true-temperature deviation below 0.19 C in those trials.
+
+**Known limitations in this session:**
+
+- Replay was detected by protocol checks, but the controller still deviated
+  about 9 C during the replay scenario's real ambient drop. Detection did not
+  ensure successful mitigation. Physics alone did not detect replay.
+- A legitimate ambient drop triggered physics alarms in both physics-enabled
+  configurations. Their deviation was about 9.03 C, versus about 0.8 C with
+  physics disabled. Disturbance handling and model-based mitigation need work.
+- The physics-only flooding cell was excluded because the analyzer flagged a
+  controller reset. The cause has not been established.
+- Later response-time values jump to roughly 4.29 billion microseconds, with
+  anomalous deadline counts. These indicate a suspected timing/counter defect
+  that needs investigation. Do not use this snapshot for deadline claims.
+- Multiple trials and hardware measurements remain future validation work.
+  This session does not establish that combining defenses always outperforms
+  protocol checks alone.
+
+See the [full generated matrix](results/local-matrix/matrix.md) and
+[per-run metrics](results/local-matrix/runs.csv) for the complete observations.
+
+## Attack scenarios
+
+| Scenario | Default behavior |
+| --- | --- |
+| `none` | Transparent proxy, no attack |
+| `bias` | Subtract 3 C from each reading without a valid replacement MAC |
+| `ramp` | Grow the reading offset at -0.01 C/s |
+| `replay` | Loop 30 s of genuine readings; also lower real ambient to 5 C |
+| `forgery` | Inject fake 18 C readings with a random MAC |
+| `flood` | Inject random sensor messages at a configured 1000 messages/s |
+| `disturb` | Lower real ambient to 5 C without an attack; test false positives |
+
+The flooding rate is a requested injection rate, not guaranteed measured
+throughput. Four defense configurations make 28 cells per trial.
+
+## Repository layout
+
+| Directory | Contents |
+| --- | --- |
+| `firmware/main/` | ESP-IDF controller and portable C protocol/detector/PI modules |
+| `firmware/test/` | Protocol tests, state-machine search, standalone simulation, C ABI |
+| `firmware/test/hostctl/` | MQTT host controller using the portable firmware code |
+| `broker/` | Local MQTT broker |
+| `plant/` | Room/heater model and independent ground-truth logging |
+| `attacker/` | MQTT attack proxy |
+| `harness/` | Attack/defense orchestration and data collection |
+| `shared/` | C# message format, authentication, topics, and ports |
+| `eval/` | Python analysis |
+| `scripts/` | Windows local-run launcher |
+| `results/local-matrix/` | Preliminary generated analysis and session metadata |
+| `paper/` | LaTeX research write-up draft |
+
+Raw run folders and build products are ignored by Git. The committed analysis
+snapshot allows inspection of reported metrics; reproducing plots from raw
+telemetry requires retaining the original session locally or making a new run.
+
+## Other development workflows
+
+On Linux with .NET 10, GCC, and Make:
 
 ```bash
 dotnet build
-. ~/.espressif/tools/activate_idf_v6.1.sh && idf.py -C firmware build
-make -C firmware/test test        # protocol unit tests
+make -C firmware/test test
+make -C firmware/test search
+make -C firmware/test hostlib
+dotnet build firmware/test/hostctl
 ```
 
-## Run the full matrix
+Start the broker and host controller in separate terminals, then run the harness:
 
-1. **Broker** (terminal 1): `broker/bin/Debug/net10.0/LoopShield.Broker`
-2. **Controller**: VS Code → *Wokwi: Select Config File* → `firmware/wokwi.toml`
-   → *Wokwi: Start Simulator*. Leave it running. The serial log should show
-   `HMAC-SHA256/64 self-test passed`.
-3. **Harness** (terminal 2):
-   ```bash
-   harness/bin/Debug/net10.0/LoopShield.Eval matrix --trials 3
-   ```
-   That's 7 scenarios × 4 configs × 3 trials = 84 runs of ~3 min, about 4.5 h.
-   Use `--trials 1` for a first pass (~1.5 h). If you stop it with Ctrl+C,
-   rerun with `--out runs/<session>` and it skips completed runs.
-4. **Analyze**:
-   ```bash
-   eval/.venv/bin/python eval/analyze.py runs/<session> --out results/final
-   ```
-   This writes `matrix.md`, `matrix.tex`, `timing.tex`, `roc.png`,
-   `temp_grid.png` and `timing.png` to `results/final/`.
-5. **Paper**: `cd paper && latexmk -pdf loopshield.tex`
+```bash
+# Terminal 1
+./broker/bin/Debug/net10.0/LoopShield.Broker
+# Terminal 2
+./firmware/test/hostctl/bin/Debug/net10.0/LoopShield.HostCtl
+# Terminal 3
+./harness/bin/Debug/net10.0/LoopShield.Eval matrix --trials 1
+```
 
-Single cells: `LoopShield.Eval single --attack replay --config both`.
-Options: `--warmup 30 --attack-s 120 --recover 30 --k 0.05 --h 4 --no-mitigate
---bias -3 --ramp -0.01 --forge-value 18 --flood-rate 1000`.
+The optional standalone C simulation is `make -C firmware/test sim`; the Windows
+MQTT workflow above does not use it. To build the ESP32 firmware, activate an
+ESP-IDF v6.1 environment and run `idf.py -C firmware build`. Hardware execution
+and deadline validation are separate from the host-based results reported here.
 
-### Attacks
-
-| Mode      | What the controller sees                                                     |
-|-----------|-------------------------------------------------------------------------------|
-| `bias`    | every reading −3 °C (MAC no longer valid)                                     |
-| `ramp`    | offset growing at −0.01 °C/s                                                  |
-| `replay`  | 30 s of earlier genuine readings, looped, while the room really cools (ambient → 5 °C) |
-| `forgery` | after each genuine reading, a fake 18 °C one with the next seq number and a random MAC |
-| `flood`   | 1000 random sensor messages/s on top of genuine traffic                       |
-| `disturb` | *not an attack*: ambient really drops to 5 °C, to measure false positives      |
-
-Run any attack by hand: `attacker/bin/Debug/net10.0/LoopShield.Attacker --mode bias --start 30 --duration 60`
-(start/stop are logged with Unix timestamps).
-
-## Without Wokwi
-
-`firmware/test/` lets you exercise everything except the ESP32 itself:
-
-- `make -C firmware/test search` runs the protocol state-machine search
-  (stretch goal). It explores attacker delivery sequences against the
-  firmware's own checks for all 8 check combinations.
-- `make -C firmware/test sim` runs a closed-loop simulation using the firmware's
-  own detector and PI code, all attacks, in seconds.
-  `build/sim --roc --ramp -0.005` sweeps the CUSUM threshold.
-- `make -C firmware/test hostlib && dotnet build firmware/test/hostctl` builds
-  a **host stand-in controller** that runs the firmware's C protocol and detector
-  code behind the same MQTT interface. Start it instead of Wokwi to test the
-  attacker, harness and analysis end to end. Its timing numbers are host
-  numbers: never report them. `analyze.py` labels such sessions.
+This is an experimental local testbed. Its authentication and mitigation design
+has not been validated for deployment in a production control system.
