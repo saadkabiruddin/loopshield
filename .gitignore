@@ -1,0 +1,29 @@
+# ESP-IDF
+firmware/build/
+firmware/managed_components/
+firmware/sdkconfig.old
+
+# Host tests
+firmware/test/build/
+
+# .NET
+bin/
+obj/
+
+# Python
+eval/.venv/
+__pycache__/
+
+# Raw run logs are large; commit the session you cite in the paper explicitly
+# (git add -f runs/<session>) or archive it with the release.
+runs/
+
+# LaTeX build output
+paper/*.aux
+paper/*.log
+paper/*.out
+paper/*.fdb_latexmk
+paper/*.fls
+
+# Editor settings (machine-specific paths)
+.vscode/

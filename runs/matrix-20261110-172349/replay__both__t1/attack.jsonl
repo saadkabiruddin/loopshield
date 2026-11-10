@@ -1,0 +1,4 @@
+{"unix_ms":1794309829983,"event":"launch","data":{"mode":"replay","start_unix_ms":1794309867851,"stop_unix_ms":1794309987851,"opt":"AttackOptions { Mode = replay, Listen = 1883, UpstreamHost = localhost, UpstreamPort = 1884, StartUnixMs = 1794309867851, StartS = 10, DurationS = 120, Bias = -3, Ramp = -0.01, RecordS = 30, ForgeValue = 18, FloodRate = 1000, Seed = 101, LogPath = D:\\loopshield\\runs\\matrix-20261110-172349\\replay__both__t1\\attack.jsonl }"}}
+{"unix_ms":1794309830434,"event":"connect","data":{"remote":"127.0.0.1:56501","mqtt":"3.1.1"}}
+{"unix_ms":1794309867857,"event":"attack_start","data":{"replay_tape":227}}
+{"unix_ms":1794309987858,"event":"attack_stop","data":{"sensor_seen":1143,"modified":0,"replayed":916,"injected":0}}

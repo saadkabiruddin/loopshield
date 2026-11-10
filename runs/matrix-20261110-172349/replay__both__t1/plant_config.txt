@@ -1,0 +1,1 @@
+Options { Broker = localhost, Port = 1884, TAmb = 15, T0 = 22, U0 = 0.35, Gain = 20, Tau = 60, Noise = 0.05, Seed = 1, DurationS = 180, DistAtS = 40, DistTAmb = 5, RunDir = D:\loopshield\runs\matrix-20261110-172349\replay__both__t1, Quiet = True }

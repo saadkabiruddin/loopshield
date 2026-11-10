@@ -1,0 +1,17 @@
+<Solution>
+  <Folder Name="/attacker/">
+    <Project Path="attacker/LoopShield.Attacker.csproj" />
+  </Folder>
+  <Folder Name="/broker/">
+    <Project Path="broker/LoopShield.Broker.csproj" />
+  </Folder>
+  <Folder Name="/harness/">
+    <Project Path="harness/LoopShield.Eval.csproj" />
+  </Folder>
+  <Folder Name="/plant/">
+    <Project Path="plant/LoopShield.Plant.csproj" />
+  </Folder>
+  <Folder Name="/shared/">
+    <Project Path="shared/LoopShield.Shared.csproj" />
+  </Folder>
+</Solution>

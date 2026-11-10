@@ -1,0 +1,6 @@
+# 1 ms tick so the 100 ms control period and timing stats have fine resolution.
+CONFIG_FREERTOS_HZ=1000
+
+# Wi-Fi + MQTT firmware does not fit the default 1 MB app partition.
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y

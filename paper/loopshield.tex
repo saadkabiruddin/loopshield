@@ -1,0 +1,370 @@
+\documentclass[10pt,twocolumn]{article}
+\usepackage[margin=0.75in,columnsep=0.25in]{geometry}
+\usepackage{mathptmx}
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{makecell}
+\usepackage{xcolor}
+\usepackage{amssymb}
+\usepackage[hidelinks]{hyperref}
+
+% Tables and figures come straight from eval/analyze.py:
+%   eval/.venv/bin/python eval/analyze.py runs/<session> --out results/final
+\newcommand{\res}{../results/final}
+% Result-dependent statements still to be written from the final data.
+\newcommand{\todo}[1]{\textcolor{red}{\textbf{TODO:} #1}}
+
+\title{\textbf{LoopShield: Layered Sensor Spoofing Detection\\for Real-Time Controllers}}
+\author{Saad Kabir Uddin}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Networked controllers increasingly receive their sensor readings over
+general-purpose links that an attacker on the network can tamper with. We ask
+whether a resource-constrained real-time controller can detect sensor spoofing
+on that link---at both the protocol layer and the physical layer---without
+missing its control deadlines. We build a closed-loop testbed in which an
+ESP32 running FreeRTOS regulates a simulated room's temperature over MQTT,
+an on-path attacker mounts five attacks (bias injection, slow ramp, replay,
+forgery and flooding), and two independent, separately switchable defense
+layers guard the controller: per-message authentication and freshness checks,
+and a physics-based detector combining a model invariant with CUSUM.
+Across the full attack $\times$ defense matrix we measure detection rate, false
+positives, time to detect, worst true-temperature deviation and the real-time
+cost of each layer. \todo{one-sentence headline result from the matrix and timing table.}
+\end{abstract}
+
+\section{Introduction}
+Cyber-physical systems close a control loop through a network: a sensor
+reports, a controller computes, an actuator acts. If the sensor's messages can
+be altered in transit, the controller can be steered into driving the physical
+process anywhere the attacker likes while believing everything is
+fine---the core of the Stuxnet attack, which replayed normal-looking readings
+while the plant was being damaged.
+
+Two families of defenses exist. \emph{Protocol-layer} defenses (message
+authentication codes, sequence numbers, freshness windows) stop an attacker who
+lacks the key, at the price of cryptography on every message. \emph{Physics-layer}
+defenses check that measurements are consistent with what the physical process
+can do~\cite{cardenas2011,giraldo2018}; they need no key and catch a compromised
+sender, but they are statistical, so they trade detection delay against false
+alarms. Both cost CPU time, and a real-time controller has a fixed budget: a
+defense that makes the control task miss its deadlines is itself a
+denial-of-service vector.
+
+This paper asks: \emph{can a resource-constrained real-time controller run both
+kinds of defense and still meet its deadlines, and which layer catches which
+attack?} Our contributions are:
+\begin{itemize}
+  \item an open testbed (ESP32/FreeRTOS controller in Wokwi, C\# plant
+        simulator and on-path attacker, automated harness) in which every
+        defense can be toggled at runtime so that each layer's contribution is
+        isolated;
+  \item a lightweight physics detector (model observer, slope invariant,
+        two-sided CUSUM) that fits in its own RTOS task;
+  \item the attack $\times$ defense matrix and per-layer timing, including under
+        flooding.
+\end{itemize}
+
+\section{System and Threat Model}
+\paragraph{Plant.} A single room with a heater, modelled as
+$\dot T = \big((T_{amb} - T) + K u\big)/\tau$ with $T_{amb}=15\,^\circ$C,
+$K=20\,^\circ$C, $\tau=60$\,s and heater duty $u\in[0,1]$. The plant runs as a
+separate program, publishes the temperature plus Gaussian noise
+($\sigma=0.05\,^\circ$C) every 100\,ms, and logs the \emph{true} temperature,
+which gives every experiment ground truth the attacker cannot touch.
+
+\paragraph{Controller.} An ESP32 (Xtensa LX6, 160\,MHz, dual core) running
+ESP-IDF~v6.1/FreeRTOS, simulated in Wokwi. A PI controller
+($K_p=0.5$, $T_i=60$\,s, conditional-integration anti-windup) runs as a periodic
+task every 100\,ms with an implicit deadline equal to its period, regulating the
+room to $22\,^\circ$C.
+
+\paragraph{Link.} All traffic is MQTT over TCP. The controller connects to the
+broker through a proxy, which is where the attacker sits.
+
+\paragraph{Attacker.} An on-path man-in-the-middle on the controller's link
+(as obtained by ARP spoofing or a rogue access point on an unencrypted network).
+It can read, drop, modify, delay, replay and inject any message, but it
+compromises neither node's firmware and does not know the shared key. It
+implements five attacks on sensor messages:
+\emph{bias} adds $-3\,^\circ$C; \emph{slow ramp} adds an offset growing at
+$-0.01\,^\circ$C/s; \emph{replay} records 30\,s of genuine readings and plays
+them back in place of live ones while the room is genuinely cooled by an
+ambient drop to $5\,^\circ$C (the Stuxnet pattern); \emph{forgery} injects,
+after every genuine reading, a fabricated one claiming $18\,^\circ$C with the
+next sequence number and a random MAC; \emph{flooding} injects 1000 random
+sensor messages per second. Out of scope: physical attacks on the sensor,
+compromised endpoints, and attacks on the out-of-band configuration channel
+used by the test harness.
+
+\section{Defenses}
+Every sensor message is a fixed 28-byte frame: version, type, flags, a 32-bit
+sequence number, a 64-bit sender timestamp, the float reading and an 8-byte
+truncated HMAC-SHA256. All fields are present in every configuration, so
+switching a defense on changes only the \emph{checking}, never message size or
+parsing cost.
+
+\subsection{Protocol layer}
+Three checks, each switchable, run in the MQTT receive path, in this order:
+\begin{enumerate}
+  \item \textbf{MAC}: HMAC-SHA256 truncated to 64 bits (PSA Crypto), compared in
+        constant time. It runs first so that unauthenticated messages can never
+        advance the sequence or time state.
+  \item \textbf{Sequence}: strictly increasing sequence numbers.
+  \item \textbf{Freshness}: sender and receiver clocks are not synchronised (and
+        the simulator runs a few percent slower than real time). The offset
+        $o = t_{local} - t_{sender}$ is network delay plus clock offset, and
+        delaying a message can only \emph{increase} it. The receiver therefore
+        tracks the smallest offset seen, $o_{min}$, and rejects a message if
+        $o > o_{min} + 250\,\text{ms} + \rho\,\Delta t$, where $\Delta t$ is the
+        time since $o_{min}$ was observed and $\rho=1\%$ absorbs a receiver clock
+        that runs fast. Sender timestamps must also strictly increase, which
+        rejects replays and duplicates. Section~\ref{sec:search} shows why the
+        reference must be the minimum and not the last message.
+\end{enumerate}
+If no message is accepted for five periods, the controller declares the sensor
+lost and holds its output rather than integrating on stale data.
+
+\subsection{Physics layer}
+A separate RTOS task receives each period's accepted measurement $y_k$ and the
+heater command $u_{k-1}$ that acted during the period.
+\paragraph{Observer.} $\hat T$ follows the nominal model driven by $u$, with a
+small correction $\ell=0.01$ toward $y$. The innovation
+$r_k = y_k - \hat T_{k|k-1}$ is zero-mean noise when the sensor is honest. A bias
+shifts it immediately; a slow ramp produces a persistent offset, because the
+closed loop drives $y$ to the setpoint while $u$, which the observer sees,
+follows the \emph{true} temperature.
+\paragraph{CUSUM.} Two-sided: $S^\pm_k = \max(0, S^\pm_{k-1} \pm r_k - k)$,
+alarm when $S^+$ or $S^-$ exceeds $h$. We use $k=0.05$ and $h=4$, chosen in a
+host simulation (zero false alarms in 10 simulated hours, a
+$0.005\,^\circ$C/s ramp detected in about 50\,s); Fig.~\ref{fig:roc} sweeps $h$
+on the testbed data.
+\paragraph{Invariant.} The least-squares slope of $y$ over the last 2\,s must
+lie in the range the model allows for the observed $u$ and \emph{any} ambient
+temperature in $[5, 25]\,^\circ$C, plus a 3$\sigma$ tolerance. ``Heater on but
+temperature flat'' and ``faster change than any heater can produce'' both
+violate it; three consecutive violations raise an alarm.
+\paragraph{Mitigation.} On a physics alarm the observer stops trusting $y$ and
+the controller regulates the model estimate $\hat T$ instead.
+
+\section{Implementation}
+The firmware separates concerns by task so that timing measurements mean what
+they say (Table~\ref{tab:tasks}). The control task performs no I/O: it reads the
+latest accepted sample from a length-one queue and hands the actuator command
+to a low-priority transmit task. Protocol checks run in the MQTT task on the
+network core, so their cost under flooding appears as interference rather than
+as control-task execution time. Wi-Fi power saving is disabled: its default
+modem sleep wakes only at DTIM beacons (a 300--400\,ms listen interval in our
+setup), which can delay received readings by several control periods.
+
+\begin{table}[t]
+\centering\small
+\caption{Firmware task layout.}
+\label{tab:tasks}
+\begin{tabular}{llcc}
+\toprule
+Task & Work & Core & Prio \\
+\midrule
+control & PI / safe mode, 100\,ms & 1 & 10 \\
+detector & observer, CUSUM, invariant & 1 & 8 \\
+MQTT & receive + protocol checks & 0 & 5 \\
+tx & publish actuator, telemetry & 0 & 4 \\
+Wi-Fi / lwIP & network stack & 0 & 23 / 18 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Each control job $j$ is released at $t_0 + jP$; its response time is measured
+from that nominal release to completion, so delayed wake-ups count. A deadline
+miss is a response time above $P$. Every period the controller publishes a
+telemetry record (measurement, command, mode, observer state, CUSUM statistics,
+cumulative accept/reject counters, control and detector execution and response
+times, and per-period protocol-check cost); a summary with cumulative worst
+cases is published every 10\,s.
+
+The protocol checks, detector and PI law are portable C with no ESP-IDF
+dependencies. They are unit-tested on the host, and a host closed-loop
+simulation runs the same code faster than real time for tuning.
+
+\section{Evaluation Methodology}
+A harness runs each (attack, configuration, trial) cell automatically: it
+starts the attacker (as a transparent relay in attack-free runs, so every run
+has the same network path), sends the configuration to the controller and
+waits for its acknowledgement (which also resets PI, detector, protocol state
+and statistics), and starts the plant warm at the setpoint. Each run is a
+30\,s warm-up, a 120\,s attack window and 30\,s of recovery. Configurations are
+\emph{none}, \emph{protocol only}, \emph{physics only} and \emph{both}, plus a
+benign \emph{disturbance} scenario (a real ambient drop with no attacker) to
+measure false positives on a legitimate change. \todo{number of trials.}
+
+\paragraph{Metrics.} \emph{Detection}: an enabled layer flags the attack inside
+the attack window (first rejected message or first physics alarm).
+\emph{Time to detect}: from attack start to that flag. \emph{False positive}:
+any flag before the attack (or anywhere in attack-free runs). \emph{Max
+deviation}: worst $|T_{true}-22\,^\circ\text{C}|$ from attack start to run end,
+from the plant's ground truth. \emph{Timing}: control execution and response
+times, detector execution, protocol-check cost per message, and deadline misses.
+
+\section{Results}
+
+\begin{table*}[t]
+\centering\small
+\caption{Attack $\times$ defense matrix. Each cell: detection rate / mean time to
+detect, then the worst true-temperature deviation from the setpoint (and the
+false-positive rate when non-zero). Attack-free rows show false-positive rate and
+deviation. $^*$Disturbance is a real ambient drop, not an attack.}
+\label{tab:matrix}
+\input{\res/matrix.tex}
+\end{table*}
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{\res/temp_grid.png}
+\caption{True room temperature under each attack and defense configuration
+(trial 1). Shaded: attack window. Green band: $\pm 0.5\,^\circ$C.}
+\label{fig:temps}
+\end{figure*}
+
+\paragraph{Which layer catches which attack.} Table~\ref{tab:matrix} and
+Fig.~\ref{fig:temps}. \todo{describe from the data. Expected from design and the
+host simulation, to be confirmed or refuted: the protocol layer rejects bias,
+ramp and forgery by MAC and replay by sequence/freshness; physics catches bias,
+forgery and flooding within a sample and the ramp after it accumulates, but not
+replay, because replayed readings are physically consistent; the disturbance
+raises a physics false positive, because the model cannot distinguish an
+unknown ambient change from spoofing.}
+
+\subsection{Protocol state-machine search}\label{sec:search}
+We model the receiver's checks as a state machine and search exhaustively
+(memoised depth-first search, 50\,ms steps over 1.4\,s, after three on-time
+messages) over attacker action sequences: deliver nothing; deliver any genuine
+message emitted so far, early, late, again or out of order; or forge a message
+with the next or a far-ahead sequence number. A delivery the firmware's own
+check function accepts is malicious if it is forged, a replay (not newer than
+an accepted message) or stale (more than 500\,ms old on arrival).
+Table~\ref{tab:search} summarises the result for all eight check combinations.
+
+\begin{table}[t]
+\centering\small
+\caption{Shortest malicious sequence accepted, per check combination
+(\checkmark{} = none found within the horizon).}
+\label{tab:search}
+\begin{tabular}{lccc}
+\toprule
+Checks & Forged & Replay & Stale \\
+\midrule
+none            & 1 step & 1 step & 1 step \\
+seq             & 1 step & \checkmark & 1 step \\
+fresh, seq+fresh& 1 step & \checkmark & \checkmark \\
+mac             & \checkmark & 1 step & 1 step \\
+mac+seq         & \checkmark & \checkmark & 1 step \\
+mac+fresh, all  & \checkmark & \checkmark & \checkmark \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Three findings. (i) Our first freshness check compared each message only with
+the \emph{last accepted} one. The search found an \emph{incremental delay}
+attack against it: delay message $n$ by 250\,ms, $n{+}1$ by 500\,ms, $n{+}2$ by
+550\,ms. Each step looks fresh relative to its predecessor, so the delay grows
+without bound. Anchoring to the minimum offset caps the added delay at
+$250\,\text{ms} + \rho\,\Delta t$, and the search then finds nothing. (ii) Once
+freshness enforces strictly increasing authenticated timestamps, the sequence
+check is redundant in this model. (iii) Every combination trusts the
+\emph{first} message after a reset, however old. A cold-start receiver accepts
+an hour-old genuine message, so a deployment needs an initial challenge or
+synchronised time.
+
+\paragraph{Seq numbers without a MAC are not enough.} With sequence checking but
+no MAC, a forged message carrying the next sequence number is accepted and
+then causes the genuine message with that number to be rejected, locking the
+real sensor out (a unit test in the repository shows this). \todo{whether the
+testbed shows this in the protocol-only forgery cell.}
+
+\begin{table}[t]
+\centering\scriptsize
+\caption{Real-time cost per configuration, without attack and under flooding.
+Control execution covers one job; WCRT is the worst control response time over
+the whole run (deadline 100\,ms).}
+\label{tab:timing}
+\resizebox{\columnwidth}{!}{\input{\res/timing.tex}}
+\end{table}
+
+\paragraph{Real-time cost.} Table~\ref{tab:timing} and Fig.~\ref{fig:timing}.
+\todo{HMAC cost per message; detector execution per period as a fraction of the
+100\,ms budget; WCRT and deadline misses with and without defenses; flooding:
+whether per-message checking on the network core interferes with the control
+task on the other core, and the protocol-check CPU share at 1000\,msg/s.}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{\res/timing.png}
+\caption{Execution cost of each layer and worst-case control response time.}
+\label{fig:timing}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{\res/roc.png}
+\caption{CUSUM ROC over the threshold $h$, recomputed offline from the logged
+measurements and commands (run level; negatives are attack-free segments).}
+\label{fig:roc}
+\end{figure}
+
+\paragraph{Detection threshold.} Fig.~\ref{fig:roc}. \todo{shape of the ramp ROC
+and whether $h=4$ sits at the knee.}
+
+\section{Discussion and Limitations}
+\textbf{The layers are complementary.} The protocol layer is exact against an
+outsider without the key but blind to a compromised sender; the physics layer
+needs no key but is blind to physically plausible lies such as replay, and it
+cannot tell spoofing from a real change its model does not know (the
+disturbance row). A constant bias is, in steady state, only detectable at all
+because the model assumes a known ambient temperature.
+\textbf{Simulation.} Wokwi is not cycle-accurate and ran about 2\% slower than
+real time; absolute execution times are indicative, and relative comparisons
+between configurations are the meaningful result. \todo{confirm with the
+measured spread.} \textbf{Keys.} A single pre-shared lab key; provisioning and
+rotation are out of scope. \textbf{Configuration channel.} The harness
+reconfigures the controller over an unauthenticated topic, which the attacker
+in our model does not touch; a deployment would authenticate it or remove it.
+
+\section{Related Work}
+Physics-based attack detection in CPS is surveyed by Giraldo et
+al.~\cite{giraldo2018}. C\'ardenas et al.~\cite{cardenas2011} apply CUSUM to
+process-control attacks, and Urbina et al.~\cite{urbina2016} show that stateful
+detectors such as CUSUM limit the impact of stealthy attacks better than
+stateless ones. Mo and Sinopoli~\cite{mo2009} analyse replay attacks and
+propose watermarking the control input. Truncated MACs with freshness values
+are standard in automotive networks (AUTOSAR SecOC). We combine both layers on
+one constrained real-time controller and measure their cost against its
+deadlines.
+
+\section{Conclusion}
+\todo{answer the research question in two or three sentences from the results.}
+
+\paragraph{Reproducibility.} Firmware, plant, attacker, harness, analysis and
+raw run logs: \url{https://github.com/saadkabiruddin/spoofguard}.
+
+\begin{thebibliography}{9}\small
+\bibitem{cardenas2011} A.~A. C\'ardenas, S.~Amin, Z.-S. Lin, Y.-L. Huang, C.-Y. Huang,
+  and S.~Sastry, ``Attacks against process control systems: risk assessment,
+  detection, and response,'' in \emph{Proc. ACM ASIACCS}, 2011.
+\bibitem{giraldo2018} J.~Giraldo, D.~Urbina, A.~Cardenas, J.~Valente, M.~Faisal,
+  J.~Ruths, N.~O. Tippenhauer, H.~Sandberg, and R.~Candell, ``A survey of
+  physics-based attack detection in cyber-physical systems,'' \emph{ACM
+  Computing Surveys}, vol.~51, no.~4, 2018.
+\bibitem{urbina2016} D.~I. Urbina, J.~A. Giraldo, A.~A. Cardenas, N.~O. Tippenhauer,
+  J.~Valente, M.~Faisal, J.~Ruths, R.~Candell, and H.~Sandberg, ``Limiting the
+  impact of stealthy attacks on industrial control systems,'' in \emph{Proc. ACM
+  CCS}, 2016.
+\bibitem{mo2009} Y.~Mo and B.~Sinopoli, ``Secure control against replay attacks,''
+  in \emph{Proc. Allerton Conference on Communication, Control, and Computing}, 2009.
+\end{thebibliography}
+
+\end{document}

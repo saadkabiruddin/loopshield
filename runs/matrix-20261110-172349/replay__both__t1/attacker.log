@@ -1,0 +1,5 @@
+attacker: mode=replay listen :1883 -> localhost:1884
+          attack window 17:24:27.851 + 120 s
+17:23:50.432 relay up for 127.0.0.1:56501
+17:24:27.862 ATTACK START (replay)
+17:26:27.859 ATTACK STOP  {"sensor_seen":1143,"modified":0,"replayed":916,"injected":0}

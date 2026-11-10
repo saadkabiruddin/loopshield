@@ -1,0 +1,22 @@
+{
+  "complete": true,
+  "attack": "replay",
+  "config": "both",
+  "trial": 1,
+  "seed": 1,
+  "run_id": 943098298,
+  "controller_config": "run=943098298 seq=1 fresh=1 mac=1 phys=1 mitigate=1 k=0.05 h=4 integ=0.3500",
+  "ack": "run=943098298 epoch=1 mac_ok=1",
+  "plant_launch_unix_ms": 1794309837858,
+  "attack_start_unix_ms": 1794309867851,
+  "attack_stop_unix_ms": 1794309987851,
+  "disturbance_at_s": 40,
+  "warmup_s": 30,
+  "attack_s": 120,
+  "recover_s": 30,
+  "setpoint": 22,
+  "mitigate": true,
+  "cusum_k": 0.05,
+  "cusum_h": 4,
+  "telemetry_rows": 1890
+}
