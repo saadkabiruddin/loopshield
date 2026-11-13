@@ -218,3 +218,7 @@ and deadline validation are separate from the host-based results reported here.
 
 This is an experimental local testbed. Its authentication and mitigation design
 has not been validated for deployment in a production control system.
+
+## License
+
+Released under the [MIT License](LICENSE).
