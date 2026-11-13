@@ -132,6 +132,19 @@ estimates. A displayed 100% detection rate represents one detected trial.
 Bias, ramp, and forgery were detected within 0.2 seconds with both defenses,
 with true-temperature deviation below 0.19 C in those trials.
 
+![True room temperature under each attack and defense configuration](results/local-matrix/temp_grid.png)
+
+*True room temperature from the plant's ground-truth log. Red shading marks
+the attack window; green marks the ±0.5 C band around the 22 C setpoint. The
+replay and disturbance panels show the uncorrected ambient drop described
+below.*
+
+![Offline CUSUM ROC sweep over threshold h](results/local-matrix/roc.png)
+
+*Offline CUSUM threshold sweep over the same logged session; it is not an
+independent validation experiment. The timing plot (`timing.png`) is omitted
+here because of the counter anomaly noted below.*
+
 **Known limitations in this session:**
 
 - Replay was detected by protocol checks, but the controller still deviated
